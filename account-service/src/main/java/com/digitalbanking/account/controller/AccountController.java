@@ -1,6 +1,7 @@
 package com.digitalbanking.account.controller;
 
 import com.digitalbanking.account.dto.AccountRequest;
+import com.digitalbanking.account.dto.AmountRequest;
 import com.digitalbanking.account.entity.Account;
 import com.digitalbanking.account.service.AccountService;
 import jakarta.validation.Valid;
@@ -62,4 +63,35 @@ public class AccountController {
                 accountService.getAccountsByCustomerId(customerId)
         );
     }
+
+
+
+    @PutMapping("/{id}/debit")
+    public ResponseEntity<Account> debitAccount(
+            @PathVariable Long id,
+            @Valid @RequestBody AmountRequest request) {
+
+        Account account = accountService.debitAccount(
+                id,
+                request.getAmount()
+        );
+
+        return ResponseEntity.ok(account);
+    }
+
+
+
+    @PutMapping("/{id}/credit")
+    public ResponseEntity<Account> creditAccount(
+            @PathVariable Long id,
+            @Valid @RequestBody AmountRequest request) {
+
+        Account account = accountService.creditAccount(
+                id,
+                request.getAmount()
+        );
+
+        return ResponseEntity.ok(account);
+    }
+
 }
