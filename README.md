@@ -8,13 +8,14 @@ A hands-on **Java / Spring Boot digital banking platform** built to practice pro
 
 ## Architecture
 
+
+
+![Digital Banking Platform Architecture](./Digital%20Banking%20Platform%20Architecture.png)
+
+
 ### Kafka Event Flow
 
 ![Kafka Event Flow](./Digital%20Banking%20Kafka%20Event%20Flow%20Architecture.png)
-
-### Full Platform Target Architecture
-
-![Digital Banking Platform Architecture](./Digital%20Banking%20Platform%20Architecture.png)
 
 The Kafka flow currently being implemented is:
 
