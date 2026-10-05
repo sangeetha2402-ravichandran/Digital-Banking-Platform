@@ -1,45 +1,44 @@
-package com.digitalbanking.payment.entity;
+package com.digitalbanking.ledger.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "outbox_events")
+@Table(name = "ledger_transactions")
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class OutboxEvent {
+public class LedgerTransaction {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @Column(nullable = false, unique = true)
-    private String eventId;
+    private String paymentReference;
 
     @Column(nullable = false)
-    private String aggregateType;
+    private Long paymentId;
 
     @Column(nullable = false)
-    private String aggregateId;
+    private String sourceAccountNumber;
 
     @Column(nullable = false)
-    private String eventType;
+    private String targetAccountNumber;
 
-    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(columnDefinition = "TEXT", nullable = false)
-    private String payload;
+    @Column(nullable = false)
+    private BigDecimal amount;
+
+    @Column(nullable = false)
+    private String currency;
 
     @Column(nullable = false)
     private String status;
 
     @Column(nullable = false)
     private LocalDateTime createdAt;
-
-    private LocalDateTime publishedAt;
 }

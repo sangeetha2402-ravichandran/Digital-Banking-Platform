@@ -2,6 +2,7 @@ package com.digitalbanking.payment.service;
 
 import com.digitalbanking.payment.client.AccountClient;
 import com.digitalbanking.payment.dto.AccountResponse;
+import com.digitalbanking.payment.dto.PaymentEvent;
 import com.digitalbanking.payment.dto.PaymentRequest;
 import com.digitalbanking.payment.entity.Payment;
 import com.digitalbanking.payment.exception.AccountNotFoundException;
@@ -93,6 +94,7 @@ public class PaymentService {
                 .build();
 
         payment = paymentRepository.save(payment);
+        saveOutboxEvent(payment, "PAYMENT_CREATED");
 
         // ===========================
         // 6. DEBIT SOURCE ACCOUNT
@@ -201,19 +203,29 @@ public class PaymentService {
 
         try {
 
-            String payload = objectMapper.writeValueAsString(payment);
-
-            OutboxEvent event = OutboxEvent.builder()
+            PaymentEvent paymentEvent = PaymentEvent.builder()
                     .eventId(UUID.randomUUID().toString())
-                    .aggregateType("PAYMENT")
-                    .aggregateId(payment.getPaymentReference())
                     .eventType(eventType)
-                    .payload(payload)
+                    .paymentId(payment.getId())
+                    .paymentReference(payment.getPaymentReference())
+                    .sourceAccountNumber(payment.getSourceAccountNumber())
+                    .targetAccountNumber(payment.getTargetAccountNumber())
+                    .amount(payment.getAmount())
+                    .currency(payment.getCurrency())
+                    .status(payment.getStatus())
+                    .build();
+
+            OutboxEvent outboxEvent = OutboxEvent.builder()
+                    .eventId(paymentEvent.getEventId())
+                    .aggregateType("PAYMENT")
+                    .aggregateId(payment.getId().toString())
+                    .eventType(paymentEvent.getEventType())
+                    .payload(objectMapper.writeValueAsString(paymentEvent))
                     .status("PENDING")
                     .createdAt(LocalDateTime.now())
                     .build();
 
-            outboxEventRepository.save(event);
+            outboxEventRepository.save(outboxEvent);
 
         } catch (JacksonException ex){
 
