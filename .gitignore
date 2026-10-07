@@ -1,2 +1,5 @@
 .idea/
 *.iml
+# IBM MQ runtime logs
+mqjms.log*
+**/mqjms.log*

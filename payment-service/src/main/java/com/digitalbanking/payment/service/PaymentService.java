@@ -1,6 +1,7 @@
 package com.digitalbanking.payment.service;
 
 import com.digitalbanking.payment.client.AccountClient;
+import com.digitalbanking.payment.dto.AccountResponse;
 import com.digitalbanking.payment.dto.PaymentEvent;
 import com.digitalbanking.payment.dto.PaymentRequest;
 import com.digitalbanking.payment.entity.OutboxEvent;
@@ -9,11 +10,12 @@ import com.digitalbanking.payment.exception.AccountNotFoundException;
 import com.digitalbanking.payment.exception.PaymentNotFoundException;
 import com.digitalbanking.payment.repository.OutboxEventRepository;
 import com.digitalbanking.payment.repository.PaymentRepository;
+
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
-import com.digitalbanking.payment.dto.AccountResponse;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -39,6 +41,10 @@ public class PaymentService {
         this.objectMapper = objectMapper;
     }
 
+    // =========================================================
+    // CREATE PAYMENT
+    // =========================================================
+
     @Transactional
     public Payment createPayment(PaymentRequest request) {
 
@@ -48,6 +54,12 @@ public class PaymentService {
                 .orElse(null);
 
         if (existingPayment != null) {
+
+            System.out.println(
+                    "Duplicate payment request ignored. Existing payment: "
+                            + existingPayment.getPaymentReference()
+            );
+
             return existingPayment;
         }
 
@@ -110,38 +122,74 @@ public class PaymentService {
                 "PAYMENT_CREATED"
         );
 
+        System.out.println(
+                "Payment created: "
+                        + payment.getPaymentReference()
+        );
+
         // 7. RETURN PENDING PAYMENT
         // Fraud Service will decide APPROVED / REJECTED
         return payment;
     }
 
 
+    // =========================================================
+    // PROCESS FRAUD-APPROVED PAYMENT
+    // =========================================================
 
     @Transactional
     public Payment processApprovedPayment(PaymentEvent event) {
 
         // 1. FIND ORIGINAL PAYMENT
-        Payment payment = paymentRepository.findById(event.getPaymentId())
+        Payment payment = paymentRepository
+                .findById(event.getPaymentId())
                 .orElseThrow(() ->
                         new PaymentNotFoundException(
-                                "Payment not found: " + event.getPaymentId()
+                                "Payment not found: "
+                                        + event.getPaymentId()
                         )
                 );
 
-        // 2. IDEMPOTENCY / DUPLICATE EVENT PROTECTION
-        if ("FUNDS_TRANSFERRED".equals(payment.getStatus())) {
+        // =====================================================
+        // 2. PAYMENT-LEVEL IDEMPOTENCY
+        // =====================================================
+        // Do not move money again if the payment already
+        // passed this processing stage.
+
+        if ("FUNDS_TRANSFERRED".equals(payment.getStatus())
+                || "COMPLETED".equals(payment.getStatus())
+                || "REVERSED".equals(payment.getStatus())
+                || "COMPENSATED".equals(payment.getStatus())
+                || "COMPENSATION_FAILED".equals(payment.getStatus())
+                || "REJECTED".equals(payment.getStatus())) {
+
+            System.out.println(
+                    "Payment already processed. Skipping duplicate: "
+                            + payment.getPaymentReference()
+                            + " status="
+                            + payment.getStatus()
+            );
+
             return payment;
         }
 
-        if ("COMPENSATED".equals(payment.getStatus())) {
-            return payment;
+        // =====================================================
+        // 3. VALID STATUS CHECK
+        // =====================================================
+
+        if (!"PENDING".equals(payment.getStatus())
+                && !"APPROVED".equals(payment.getStatus())) {
+
+            throw new IllegalStateException(
+                    "Payment cannot be processed from status: "
+                            + payment.getStatus()
+            );
         }
 
-        if ("COMPENSATION_FAILED".equals(payment.getStatus())) {
-            return payment;
-        }
+        // =====================================================
+        // 4. GET ACCOUNT DETAILS
+        // =====================================================
 
-        // 3. GET ACCOUNT DETAILS
         AccountResponse sourceAccount =
                 accountClient.getAccountByAccountNumber(
                         payment.getSourceAccountNumber()
@@ -152,17 +200,46 @@ public class PaymentService {
                         payment.getTargetAccountNumber()
                 );
 
-        // 4. MARK PAYMENT APPROVED
+        // =====================================================
+        // 5. CREATE IDEMPOTENT ACCOUNT OPERATION IDS
+        // =====================================================
+
+        String debitOperationId =
+                "PAYMENT-" + payment.getId()
+                        + "-DEBIT";
+
+        String creditOperationId =
+                "PAYMENT-" + payment.getId()
+                        + "-CREDIT";
+
+        String compensationOperationId =
+                "PAYMENT-" + payment.getId()
+                        + "-COMPENSATION";
+
+        // =====================================================
+        // 6. MARK FRAUD APPROVAL
+        // =====================================================
+
         payment.setStatus("APPROVED");
         payment.setUpdatedAt(LocalDateTime.now());
+
         paymentRepository.save(payment);
 
-        // 5. DEBIT SOURCE ACCOUNT
+        // =====================================================
+        // 7. DEBIT SOURCE ACCOUNT
+        // =====================================================
+
         try {
 
             accountClient.debitAccount(
                     sourceAccount.getId(),
-                    payment.getAmount()
+                    payment.getAmount(),
+                    debitOperationId
+            );
+
+            System.out.println(
+                    "Source account debited for payment: "
+                            + payment.getPaymentReference()
             );
 
         } catch (Exception debitException) {
@@ -170,26 +247,33 @@ public class PaymentService {
             payment.setStatus("FAILED");
             payment.setUpdatedAt(LocalDateTime.now());
 
-            paymentRepository.save(payment);
+            payment = paymentRepository.save(payment);
 
             saveOutboxEvent(
                     payment,
                     "PAYMENT_FAILED"
             );
 
+            System.out.println(
+                    "Debit failed for payment: "
+                            + payment.getPaymentReference()
+            );
+
             return payment;
         }
 
-        // 6. CREDIT TARGET ACCOUNT
+        // =====================================================
+        // 8. CREDIT TARGET ACCOUNT
+        // =====================================================
+
         try {
 
             accountClient.creditAccount(
                     targetAccount.getId(),
-                    payment.getAmount()
+                    payment.getAmount(),
+                    creditOperationId
             );
 
-            // Do NOT mark COMPLETED yet.
-            // Core Banking has not processed the transaction yet.
             payment.setStatus("FUNDS_TRANSFERRED");
             payment.setUpdatedAt(LocalDateTime.now());
 
@@ -200,17 +284,27 @@ public class PaymentService {
                     "FUNDS_TRANSFERRED"
             );
 
+            System.out.println(
+                    "Funds transferred successfully: "
+                            + payment.getPaymentReference()
+            );
+
             return payment;
 
         } catch (Exception creditException) {
 
-            // 7. SAGA COMPENSATION
-            // Source debit succeeded but target credit failed.
+            // =================================================
+            // 9. SAGA COMPENSATION
+            // =================================================
+            // Debit succeeded but credit failed.
+            // Return money to the original source account.
+
             try {
 
                 accountClient.creditAccount(
                         sourceAccount.getId(),
-                        payment.getAmount()
+                        payment.getAmount(),
+                        compensationOperationId
                 );
 
                 payment.setStatus("COMPENSATED");
@@ -221,6 +315,11 @@ public class PaymentService {
                 saveOutboxEvent(
                         payment,
                         "PAYMENT_COMPENSATED"
+                );
+
+                System.out.println(
+                        "Payment compensated successfully: "
+                                + payment.getPaymentReference()
                 );
 
                 return payment;
@@ -237,15 +336,30 @@ public class PaymentService {
                         "COMPENSATION_FAILED"
                 );
 
+                System.out.println(
+                        "Payment compensation failed: "
+                                + payment.getPaymentReference()
+                );
+
                 return payment;
             }
         }
     }
 
+
+    // =========================================================
+    // GET ALL PAYMENTS
+    // =========================================================
+
     public List<Payment> getAllPayments() {
 
         return paymentRepository.findAll();
     }
+
+
+    // =========================================================
+    // GET PAYMENT BY REFERENCE
+    // =========================================================
 
     public Payment getPaymentByReference(
             String paymentReference) {
@@ -259,6 +373,11 @@ public class PaymentService {
                         )
                 );
     }
+
+
+    // =========================================================
+    // SAVE OUTBOX EVENT
+    // =========================================================
 
     private void saveOutboxEvent(
             Payment payment,
@@ -302,7 +421,9 @@ public class PaymentService {
                             .eventId(
                                     paymentEvent.getEventId()
                             )
-                            .aggregateType("PAYMENT")
+                            .aggregateType(
+                                    "PAYMENT"
+                            )
                             .aggregateId(
                                     payment.getId().toString()
                             )
@@ -314,7 +435,9 @@ public class PaymentService {
                                             paymentEvent
                                     )
                             )
-                            .status("PENDING")
+                            .status(
+                                    "PENDING"
+                            )
                             .createdAt(
                                     LocalDateTime.now()
                             )
@@ -335,6 +458,9 @@ public class PaymentService {
     }
 
 
+    // =========================================================
+    // COMPLETE PAYMENT
+    // =========================================================
 
     @Transactional
     public Payment completePayment(Long paymentId) {
@@ -343,12 +469,19 @@ public class PaymentService {
                 .findById(paymentId)
                 .orElseThrow(() ->
                         new PaymentNotFoundException(
-                                "Payment not found: " + paymentId
+                                "Payment not found: "
+                                        + paymentId
                         )
                 );
 
         // Duplicate Kafka event protection
         if ("COMPLETED".equals(payment.getStatus())) {
+
+            System.out.println(
+                    "Payment already completed: "
+                            + payment.getPaymentReference()
+            );
+
             return payment;
         }
 
@@ -371,6 +504,11 @@ public class PaymentService {
         return payment;
     }
 
+
+    // =========================================================
+    // REVERSE PAYMENT
+    // =========================================================
+
     @Transactional
     public Payment reversePayment(Long paymentId) {
 
@@ -378,14 +516,28 @@ public class PaymentService {
                 .findById(paymentId)
                 .orElseThrow(() ->
                         new PaymentNotFoundException(
-                                "Payment not found: " + paymentId
+                                "Payment not found: "
+                                        + paymentId
                         )
                 );
 
-        // Duplicate event protection
+        // =====================================================
+        // DUPLICATE REVERSAL PROTECTION
+        // =====================================================
+
         if ("REVERSED".equals(payment.getStatus())) {
+
+            System.out.println(
+                    "Payment already reversed: "
+                            + payment.getPaymentReference()
+            );
+
             return payment;
         }
+
+        // =====================================================
+        // GET ACCOUNT DETAILS
+        // =====================================================
 
         AccountResponse sourceAccount =
                 accountClient.getAccountByAccountNumber(
@@ -397,24 +549,52 @@ public class PaymentService {
                         payment.getTargetAccountNumber()
                 );
 
+        // =====================================================
+        // IDEMPOTENT REVERSAL OPERATION IDS
+        // =====================================================
+
+        String reversalDebitOperationId =
+                "PAYMENT-" + payment.getId()
+                        + "-REVERSAL-DEBIT-TARGET";
+
+        String reversalCreditOperationId =
+                "PAYMENT-" + payment.getId()
+                        + "-REVERSAL-CREDIT-SOURCE";
+
         try {
 
-            // Reverse original target credit
+            // =================================================
+            // 1. REMOVE MONEY FROM ORIGINAL TARGET
+            // =================================================
+
             accountClient.debitAccount(
                     targetAccount.getId(),
-                    payment.getAmount()
+                    payment.getAmount(),
+                    reversalDebitOperationId
             );
 
-            // Return money to original source
+            // =================================================
+            // 2. RETURN MONEY TO ORIGINAL SOURCE
+            // =================================================
+
             accountClient.creditAccount(
                     sourceAccount.getId(),
-                    payment.getAmount()
+                    payment.getAmount(),
+                    reversalCreditOperationId
             );
+
+            // =================================================
+            // 3. MARK PAYMENT REVERSED
+            // =================================================
 
             payment.setStatus("REVERSED");
             payment.setUpdatedAt(LocalDateTime.now());
 
             payment = paymentRepository.save(payment);
+
+            // =================================================
+            // 4. CREATE REVERSAL OUTBOX EVENT
+            // =================================================
 
             saveOutboxEvent(
                     payment,
@@ -440,9 +620,19 @@ public class PaymentService {
                     "REVERSAL_FAILED"
             );
 
+            System.out.println(
+                    "Payment reversal failed: "
+                            + payment.getPaymentReference()
+            );
+
             return payment;
         }
     }
+
+
+    // =========================================================
+    // REJECT PAYMENT
+    // =========================================================
 
     @Transactional
     public Payment rejectPayment(Long paymentId) {
@@ -451,12 +641,19 @@ public class PaymentService {
                 .findById(paymentId)
                 .orElseThrow(() ->
                         new PaymentNotFoundException(
-                                "Payment not found: " + paymentId
+                                "Payment not found: "
+                                        + paymentId
                         )
                 );
 
         // Duplicate Kafka event protection
         if ("REJECTED".equals(payment.getStatus())) {
+
+            System.out.println(
+                    "Payment already rejected: "
+                            + payment.getPaymentReference()
+            );
+
             return payment;
         }
 

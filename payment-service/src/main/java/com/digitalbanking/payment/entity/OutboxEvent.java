@@ -1,45 +1,53 @@
 package com.digitalbanking.payment.entity;
 
-import jakarta.persistence.*;
-import lombok.*;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
 import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "outbox_events")
-@Data
+@Getter
+@Setter
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
 public class OutboxEvent {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(nullable = false, unique = true)
     private String eventId;
 
-    @Column(nullable = false)
     private String aggregateType;
 
-    @Column(nullable = false)
     private String aggregateId;
 
-    @Column(nullable = false)
     private String eventType;
 
-    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(columnDefinition = "TEXT", nullable = false)
+    @Column(columnDefinition = "TEXT")
     private String payload;
 
-    @Column(nullable = false)
     private String status;
 
-    @Column(nullable = false)
-    private LocalDateTime createdAt;
+    // =========================================================
+    // OUTBOX RETRY / FAILURE TRACKING
+    // =========================================================
 
-    private LocalDateTime publishedAt;
+    private Integer retryCount;
+
+    @Column(columnDefinition = "TEXT")
+    private String lastError;
+
+    private LocalDateTime lastAttemptAt;
+
+    private LocalDateTime sentAt;
+
+    private LocalDateTime createdAt;
 }

@@ -38,35 +38,57 @@ public class AccountClient {
         }
     }
 
-    public AccountResponse getAccountByAccountNumber(String accountNumber) {
+    public AccountResponse getAccountByAccountNumber(
+            String accountNumber) {
 
         return restClient.get()
-                .uri("/api/accounts/number/{accountNumber}", accountNumber)
+                .uri(
+                        "/api/accounts/number/{accountNumber}",
+                        accountNumber
+                )
                 .retrieve()
                 .body(AccountResponse.class);
     }
 
+    // =========================================================
+    // DEBIT
+    // =========================================================
     public AccountResponse debitAccount(
             Long accountId,
-            BigDecimal amount) {
+            BigDecimal amount,
+            String operationId) {
 
-        AmountRequest request = new AmountRequest(amount);
+        AmountRequest request =
+                new AmountRequest(amount);
 
         return restClient.put()
                 .uri("/api/accounts/{id}/debit", accountId)
+                .header(
+                        "X-Operation-Id",
+                        operationId
+                )
                 .body(request)
                 .retrieve()
                 .body(AccountResponse.class);
     }
 
+    // =========================================================
+    // CREDIT
+    // =========================================================
     public AccountResponse creditAccount(
             Long accountId,
-            BigDecimal amount) {
+            BigDecimal amount,
+            String operationId) {
 
-        AmountRequest request = new AmountRequest(amount);
+        AmountRequest request =
+                new AmountRequest(amount);
 
         return restClient.put()
                 .uri("/api/accounts/{id}/credit", accountId)
+                .header(
+                        "X-Operation-Id",
+                        operationId
+                )
                 .body(request)
                 .retrieve()
                 .body(AccountResponse.class);

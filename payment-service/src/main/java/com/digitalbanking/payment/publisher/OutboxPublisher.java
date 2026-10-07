@@ -2,7 +2,9 @@ package com.digitalbanking.payment.publisher;
 
 import com.digitalbanking.payment.entity.OutboxEvent;
 import com.digitalbanking.payment.repository.OutboxEventRepository;
+
 import lombok.RequiredArgsConstructor;
+
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -14,82 +16,209 @@ import java.util.List;
 @RequiredArgsConstructor
 public class OutboxPublisher {
 
+    private static final int MAX_RETRIES = 5;
+
     private final OutboxEventRepository outboxEventRepository;
     private final KafkaTemplate<String, String> kafkaTemplate;
+
+    // =========================================================
+    // POLL OUTBOX TABLE
+    // =========================================================
 
     @Scheduled(fixedDelay = 5000)
     public void publishPendingEvents() {
 
-        List<OutboxEvent> events =
-                outboxEventRepository
-                        .findByStatusOrderByCreatedAtAsc("PENDING");
+        List<OutboxEvent> pendingEvents =
+                outboxEventRepository.findByStatusOrderByCreatedAtAsc("PENDING");
 
-        for (OutboxEvent event : events) {
+        for (OutboxEvent event : pendingEvents) {
 
-            try {
-
-                String topic;
-
-                switch (event.getEventType()) {
-
-                    case "PAYMENT_CREATED":
-                        topic = "payment-created";
-                        break;
-
-                    case "FUNDS_TRANSFERRED":
-                        topic = "funds-transferred";
-                        break;
-
-                     case "PAYMENT_COMPLETED":
-                        topic = "notification-events";
-                        break;
-
-                    case "COMPENSATION_FAILED":
-                        topic = "payment-rejected";
-                        break;
-
-                    case "PAYMENT_REVERSED":
-                        topic = "payment-reversed";
-                        break;
-
-                    case "REVERSAL_FAILED":
-                        topic = "payment-dlq";
-                        break;
-
-                    default:
-                        throw new IllegalArgumentException(
-                                "Unsupported Payment Service event type: "
-                                        + event.getEventType()
-                        );
-                }
-
-                kafkaTemplate.send(
-                        topic,
-                        event.getAggregateId(),
-                        event.getPayload()
-                ).get();
-
-                event.setStatus("PUBLISHED");
-                event.setPublishedAt(LocalDateTime.now());
-
-                outboxEventRepository.save(event);
-
-                System.out.println(
-                        "Published outbox event: "
-                                + event.getEventType()
-                                + " -> "
-                                + topic
-                );
-
-            } catch (Exception e) {
-
-                System.err.println(
-                        "Failed to publish event: "
-                                + event.getId()
-                                + " - "
-                                + e.getMessage()
-                );
-            }
+            publishEvent(event);
         }
+    }
+
+
+    // =========================================================
+    // PUBLISH ONE EVENT
+    // =========================================================
+
+    private void publishEvent(OutboxEvent event) {
+
+        try {
+
+            String topic =
+                    resolveTopic(event.getEventType());
+
+            // Record the attempt time
+            event.setLastAttemptAt(
+                    LocalDateTime.now()
+            );
+
+            /*
+             * KafkaTemplate.send() is asynchronous.
+             *
+             * .get() waits for Kafka acknowledgement.
+             *
+             * We mark the outbox event SENT only after
+             * Kafka confirms that the message was published.
+             */
+            kafkaTemplate.send(
+                    topic,
+                    event.getAggregateId(),
+                    event.getPayload()
+            ).get();
+
+            // =================================================
+            // KAFKA CONFIRMED SUCCESS
+            // =================================================
+
+            event.setStatus("SENT");
+
+            event.setSentAt(
+                    LocalDateTime.now()
+            );
+
+            event.setLastError(null);
+
+            outboxEventRepository.save(event);
+
+            System.out.println(
+                    "Outbox event published successfully. "
+                            + "eventId="
+                            + event.getEventId()
+                            + ", eventType="
+                            + event.getEventType()
+                            + ", topic="
+                            + topic
+            );
+
+        } catch (Exception exception) {
+
+            handlePublishFailure(
+                    event,
+                    exception
+            );
+        }
+    }
+
+
+    // =========================================================
+    // HANDLE KAFKA FAILURE
+    // =========================================================
+
+    private void handlePublishFailure(
+            OutboxEvent event,
+            Exception exception) {
+
+        int currentRetryCount =
+                event.getRetryCount() == null
+                        ? 0
+                        : event.getRetryCount();
+
+        int newRetryCount =
+                currentRetryCount + 1;
+
+        event.setRetryCount(
+                newRetryCount
+        );
+
+        event.setLastAttemptAt(
+                LocalDateTime.now()
+        );
+
+        String errorMessage =
+                exception.getMessage();
+
+        if (errorMessage == null) {
+
+            errorMessage =
+                    exception
+                            .getClass()
+                            .getSimpleName();
+        }
+
+        event.setLastError(
+                errorMessage
+        );
+
+        // =====================================================
+        // MAX RETRIES REACHED
+        // =====================================================
+
+        if (newRetryCount >= MAX_RETRIES) {
+
+            event.setStatus(
+                    "FAILED"
+            );
+
+            System.out.println(
+                    "Outbox event permanently FAILED. "
+                            + "eventId="
+                            + event.getEventId()
+                            + ", retryCount="
+                            + newRetryCount
+                            + ", error="
+                            + errorMessage
+            );
+
+        } else {
+
+            /*
+             * Keep PENDING.
+             *
+             * @Scheduled will pick this row again
+             * on the next run.
+             */
+            event.setStatus(
+                    "PENDING"
+            );
+
+            System.out.println(
+                    "Outbox publish failed. Will retry. "
+                            + "eventId="
+                            + event.getEventId()
+                            + ", retryCount="
+                            + newRetryCount
+                            + ", error="
+                            + errorMessage
+            );
+        }
+
+        outboxEventRepository.save(
+                event
+        );
+    }
+
+
+    // =========================================================
+    // EVENT TYPE → KAFKA TOPIC
+    // =========================================================
+
+    private String resolveTopic(
+            String eventType) {
+
+        return switch (eventType) {
+
+            case "PAYMENT_CREATED" ->
+                    "payment-created";
+
+            case "FUNDS_TRANSFERRED" ->
+                    "funds-transferred";
+
+            case "PAYMENT_COMPLETED" ->
+                    "notification-events";
+
+            case "PAYMENT_REVERSED" ->
+                    "payment-reversed";
+
+            case "REVERSAL_FAILED" ->
+                    "payment-dlq";
+
+            default ->
+                    throw new IllegalArgumentException(
+                            "No Kafka topic configured for event type: "
+                                    + eventType
+                    );
+        };
     }
 }

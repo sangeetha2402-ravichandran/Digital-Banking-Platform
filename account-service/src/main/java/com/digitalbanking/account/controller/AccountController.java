@@ -34,7 +34,10 @@ public class AccountController {
 
     @GetMapping
     public ResponseEntity<List<Account>> getAllAccounts() {
-        return ResponseEntity.ok(accountService.getAllAccounts());
+
+        return ResponseEntity.ok(
+                accountService.getAllAccounts()
+        );
     }
 
     @GetMapping("/{id}")
@@ -64,34 +67,39 @@ public class AccountController {
         );
     }
 
-
-
+    // =========================================================
+    // DEBIT ACCOUNT
+    // =========================================================
     @PutMapping("/{id}/debit")
     public ResponseEntity<Account> debitAccount(
             @PathVariable Long id,
+            @RequestHeader("X-Operation-Id") String operationId,
             @Valid @RequestBody AmountRequest request) {
 
         Account account = accountService.debitAccount(
                 id,
-                request.getAmount()
+                request.getAmount(),
+                operationId
         );
 
         return ResponseEntity.ok(account);
     }
 
-
-
+    // =========================================================
+    // CREDIT ACCOUNT
+    // =========================================================
     @PutMapping("/{id}/credit")
     public ResponseEntity<Account> creditAccount(
             @PathVariable Long id,
+            @RequestHeader("X-Operation-Id") String operationId,
             @Valid @RequestBody AmountRequest request) {
 
         Account account = accountService.creditAccount(
                 id,
-                request.getAmount()
+                request.getAmount(),
+                operationId
         );
 
         return ResponseEntity.ok(account);
     }
-
 }

@@ -20,80 +20,54 @@ public class PaymentCreatedConsumer {
             topics = "payment-created",
             groupId = "fraud-group"
     )
-    public void consume(String message) {
+    public void consume(String message) throws Exception {
 
-        try {
-
-            PaymentEvent event =
-                    objectMapper.readValue(
-                            message,
-                            PaymentEvent.class
-                    );
-
-            System.out.println(
-                    "Fraud Service received payment: "
-                            + event.getPaymentReference()
-            );
-
-            String targetTopic;
-
-            // Every fraud decision is a new event
-            event.setEventId(
-                    UUID.randomUUID().toString()
-            );
-
-            // Simple fraud rule for learning project
-            if (event.getAmount().doubleValue() > 10000) {
-
-                event.setEventType(
-                        "PAYMENT_REJECTED"
+        PaymentEvent event =
+                objectMapper.readValue(
+                        message,
+                        PaymentEvent.class
                 );
 
-                event.setStatus(
-                        "REJECTED"
-                );
+        System.out.println(
+                "Fraud Service received payment: "
+                        + event.getPaymentReference()
+        );
 
-                targetTopic =
-                        "payment-rejected";
+        String targetTopic;
 
-            } else {
+        event.setEventId(
+                UUID.randomUUID().toString()
+        );
 
-                event.setEventType(
-                        "PAYMENT_APPROVED"
-                );
+        if (event.getAmount().doubleValue() > 10000) {
 
-                event.setStatus(
-                        "APPROVED"
-                );
+            event.setEventType("PAYMENT_REJECTED");
+            event.setStatus("REJECTED");
 
-                targetTopic =
-                        "payment-approved";
-            }
+            targetTopic = "payment-rejected";
 
-            String payload =
-                    objectMapper.writeValueAsString(
-                            event
-                    );
+        } else {
 
-            kafkaTemplate.send(
-                    targetTopic,
-                    event.getPaymentId().toString(),
-                    payload
-            ).get();
+            event.setEventType("PAYMENT_APPROVED");
+            event.setStatus("APPROVED");
 
-            System.out.println(
-                    "Fraud result published: "
-                            + event.getEventType()
-                            + " -> "
-                            + targetTopic
-            );
-
-        } catch (Exception e) {
-
-            System.err.println(
-                    "Fraud processing failed: "
-                            + e.getMessage()
-            );
+            targetTopic = "payment-approved";
         }
+
+        String payload =
+                objectMapper.writeValueAsString(event);
+
+        kafkaTemplate.send(
+                targetTopic,
+                event.getPaymentId().toString(),
+                payload
+        ).get();
+
+        System.out.println(
+                "Fraud result published: "
+                        + event.getEventType()
+                        + " -> "
+                        + targetTopic
+        );
     }
 }
