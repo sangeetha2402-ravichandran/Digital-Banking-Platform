@@ -7,6 +7,8 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
 
+import java.util.UUID;
+
 @Component
 @RequiredArgsConstructor
 public class PaymentCreatedConsumer {
@@ -23,7 +25,10 @@ public class PaymentCreatedConsumer {
         try {
 
             PaymentEvent event =
-                    objectMapper.readValue(message, PaymentEvent.class);
+                    objectMapper.readValue(
+                            message,
+                            PaymentEvent.class
+                    );
 
             System.out.println(
                     "Fraud Service received payment: "
@@ -32,38 +37,62 @@ public class PaymentCreatedConsumer {
 
             String targetTopic;
 
+            // Every fraud decision is a new event
+            event.setEventId(
+                    UUID.randomUUID().toString()
+            );
+
+            // Simple fraud rule for learning project
             if (event.getAmount().doubleValue() > 10000) {
 
-                event.setEventType("PAYMENT_REJECTED");
-                event.setStatus("REJECTED");
+                event.setEventType(
+                        "PAYMENT_REJECTED"
+                );
 
-                targetTopic = "payment-rejected";
+                event.setStatus(
+                        "REJECTED"
+                );
+
+                targetTopic =
+                        "payment-rejected";
 
             } else {
 
-                event.setEventType("PAYMENT_APPROVED");
-                event.setStatus("APPROVED");
+                event.setEventType(
+                        "PAYMENT_APPROVED"
+                );
 
-                targetTopic = "payment-approved";
+                event.setStatus(
+                        "APPROVED"
+                );
+
+                targetTopic =
+                        "payment-approved";
             }
 
             String payload =
-                    objectMapper.writeValueAsString(event);
+                    objectMapper.writeValueAsString(
+                            event
+                    );
 
             kafkaTemplate.send(
                     targetTopic,
                     event.getPaymentId().toString(),
                     payload
-            );
+            ).get();
 
             System.out.println(
-                    "Fraud result published to: " + targetTopic
+                    "Fraud result published: "
+                            + event.getEventType()
+                            + " -> "
+                            + targetTopic
             );
 
         } catch (Exception e) {
 
             System.err.println(
-                    "Fraud processing failed: " + e.getMessage()
+                    "Fraud processing failed: "
+                            + e.getMessage()
             );
         }
     }

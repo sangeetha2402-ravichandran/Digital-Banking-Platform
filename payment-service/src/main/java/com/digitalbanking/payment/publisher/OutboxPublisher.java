@@ -7,7 +7,6 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -22,9 +21,11 @@ public class OutboxPublisher {
     public void publishPendingEvents() {
 
         List<OutboxEvent> events =
-                outboxEventRepository.findByStatusOrderByCreatedAtAsc("PENDING");
+                outboxEventRepository
+                        .findByStatusOrderByCreatedAtAsc("PENDING");
 
         for (OutboxEvent event : events) {
+
             try {
 
                 String topic;
@@ -35,19 +36,30 @@ public class OutboxPublisher {
                         topic = "payment-created";
                         break;
 
-                    case "PAYMENT_COMPLETED":
-                        topic = "payment-approved";
+                    case "FUNDS_TRANSFERRED":
+                        topic = "funds-transferred";
                         break;
 
-                    case "PAYMENT_FAILED":
-                    case "PAYMENT_COMPENSATED":
+                     case "PAYMENT_COMPLETED":
+                        topic = "notification-events";
+                        break;
+
                     case "COMPENSATION_FAILED":
                         topic = "payment-rejected";
                         break;
 
+                    case "PAYMENT_REVERSED":
+                        topic = "payment-reversed";
+                        break;
+
+                    case "REVERSAL_FAILED":
+                        topic = "payment-dlq";
+                        break;
+
                     default:
                         throw new IllegalArgumentException(
-                                "Unknown event type: " + event.getEventType()
+                                "Unsupported Payment Service event type: "
+                                        + event.getEventType()
                         );
                 }
 
@@ -59,10 +71,14 @@ public class OutboxPublisher {
 
                 event.setStatus("PUBLISHED");
                 event.setPublishedAt(LocalDateTime.now());
+
                 outboxEventRepository.save(event);
 
                 System.out.println(
-                        "Published outbox event: " + event.getId()
+                        "Published outbox event: "
+                                + event.getEventType()
+                                + " -> "
+                                + topic
                 );
 
             } catch (Exception e) {
@@ -76,4 +92,4 @@ public class OutboxPublisher {
             }
         }
     }
-    }
+}
