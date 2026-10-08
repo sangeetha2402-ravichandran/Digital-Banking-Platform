@@ -782,12 +782,54 @@ digital-banking-platform/
 ├── ledger-service/
 ├── notification-service/
 ├── payment-service/
-├── doc/
-│   ├── Digital Banking Event Flow Architecture.png
-│   ├── Digital Banking Platform Architecture.png
-│   └── Kafka Digital Banking Event Flow.png
+├── docs/
+│   ├── fraud-approval-published.png
+│   ├── partition-assignment-outbox-query.png
+│   ├── payment-consumer-config.png
+│   └── payment-json-event.png
+├── Digital Banking Event Flow Architecture.png
+├── Digital Banking Kafka Event Flow Architecture.png
+├── Digital Banking Platform Architecture.png
+├── Kafka Digital Banking Event Flow.png
 └── README.md
 ```
+
+---
+
+## Kafka Runtime Evidence
+
+The following screenshots record local execution of the Spring Boot and Kafka services on 6 October 2026.
+
+### Payment Service Kafka configuration
+
+Payment Service started on HTTP port `8083`. The consumer log shows bootstrap server `localhost:9092`, consumer group `payment-group`, `auto.offset.reset=earliest` and `enable.auto.commit=false`.
+
+![Payment consumer configuration](docs/payment-consumer-config.png)
+
+### Fraud Service event publishing
+
+Fraud Service received a payment and logged publication to Kafka topic `payment-approved`. The Kafka producer log also shows an idempotent producer was initialized.
+
+```text
+Fraud Service received payment: PAY-11ab153c-f28b-4172-811d-ab61ce3d34f5
+Fraud result published to: payment-approved
+```
+
+![Fraud approval published](docs/fraud-approval-published.png)
+
+### Payment event consumption
+
+Payment Service logged receipt of a JSON payment event containing account references, amount `500.00`, currency `NZD`, payment type `TRANSFER`, payment status `COMPLETED`, and an idempotency key.
+
+![Payment JSON event](docs/payment-json-event.png)
+
+### Kafka consumer partitions and outbox polling
+
+The consumer group `payment-group` was assigned partitions 0, 1 and 2 of the earlier test topic `payment-events`. A Hibernate SQL log also shows a query selecting pending records from `outbox_events` ordered by creation time.
+
+![Kafka partitions and outbox SQL](docs/partition-assignment-outbox-query.png)
+
+These screenshots demonstrate the particular Kafka and database operations shown in the logs. They are not, by themselves, evidence of the entire IBM MQ request/reply workflow.
 
 ---
 
