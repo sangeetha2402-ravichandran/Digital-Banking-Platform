@@ -1,239 +1,157 @@
 # Digital Banking Payment & Transaction Platform
 
-**Java 17 | Spring Boot | Apache Kafka | PostgreSQL | Docker | REST APIs | Transactional Outbox | Saga Compensation**
+A hands-on **Java 17 / Spring Boot digital banking platform** implementing event-driven microservices with **Apache Kafka**, **PostgreSQL**, the **Transactional Outbox Pattern**, **Saga compensation**, **consumer and account-level idempotency**, and **real IBM MQ/JMS request-reply integration**.
 
-A digital banking microservices project implementing payment APIs, account transfers, event-driven fraud processing, transaction persistence and failure compensation. Apache Kafka provides asynchronous communication between services. The architecture also includes a future IBM MQ/JMS integration with legacy banking systems.
+The project simulates a banking payment flow from payment initiation through fraud screening, account movement, ledger posting, IBM MQ core-banking integration, payment completion, and notification.
+
+---
 
 ## Architecture
 
-![Digital Banking Platform Architecture](./Digital%20Banking%20Platform%20Architecture.png)
+![Digital Banking Platform Architecture](/Digital%20Banking%20Platform%20Architecture.png)
 
-### Kafka Event Flow
+![Digital Banking Event Flow Architecture](/Digital%20Banking%20Event%20Flow%20Architecture.png)
 
-![Kafka Event Flow](./Digital%20Banking%20Event%20Flow%20Architecture.png)
-
-### Implemented Kafka Processing Flow
+### Implemented End-to-End Flow
 
 ```text
 Client / Postman
-       |
-       v
+      |
+      v
 Payment Service (8083)
-       |-- paymentdb / payments
-       |-- paymentdb / outbox_events
-       v
-Outbox Publisher
-       |
-       v
+      |
+      | Save Payment = PENDING
+      | Save PAYMENT_CREATED to Outbox
+      v
+paymentdb
+payments + outbox_events
+      |
+      v
+OutboxPublisher
+      |
+      v
 Kafka: payment-created
-       |
-       v
+      |
+      v
 Fraud Service (8084)
-       |
-       +-- APPROVED --> Kafka: payment-approved --> Ledger Service (8085)
-       |                                           |
-       |                                           v
-       |                                     ledgerdb / ledger_transactions
-       |
-       +-- REJECTED --> Kafka: payment-rejected
+      |
+      +-------------------------------+
+      |                               |
+      | APPROVED                      | REJECTED
+      v                               v
+Kafka: payment-approved          Kafka: payment-rejected
+      |                               |
+      v                               v
+Payment Service                  Payment Service
+      |                          status = REJECTED
+      |                          Notification Service
+      |
+      | debit source account
+      | credit target account
+      v
+status = FUNDS_TRANSFERRED
+      |
+      | Outbox
+      v
+Kafka: funds-transferred
+      |
+      v
+Ledger Service (8085)
+      |
+      | Persist ledger transaction
+      v
+ledgerdb
+      |
+      v
+Kafka: ledger-updated
+      |
+      v
+Integration Service (8087)
+      |
+      | Build CoreBankingRequest
+      | JSON serialization
+      v
+JmsTemplate
+      |
+      v
+IBM MQ - QM1
+DEV.QUEUE.1  (REQUEST)
+      |
+      v
+Core Banking Simulator (8088)
+      |
+      | Process request
+      | Build CoreBankingResponse
+      v
+IBM MQ - QM1
+DEV.QUEUE.2  (RESPONSE)
+      |
+      v
+Integration Service
+@JmsListener
+      |
+      +-------------------------------+
+      |                               |
+      | SUCCESS                       | FAILURE
+      v                               v
+Kafka: core-processed            Kafka: core-failed
+      |
+      v
+Payment Service
+status = COMPLETED
+      |
+      | Outbox
+      v
+Kafka: notification-events
+      |
+      v
+Notification Service (8086)
+      |
+      v
+notificationdb
 ```
 
-The Kafka fraud approval/rejection branches and Ledger Service database insert have been tested. Ledger Service is configured to publish `notification-events`; complete downstream processing is not yet verified.
+---
 
-## Implemented Components
+## Services
 
-| Component | Technology | Functionality |
-|---|---|---|
-| Customer Service | Spring Boot, Spring Data JPA | Customer APIs and persistence in `customerdb` |
-| Account Service | Spring Boot | Account operations used in fund transfers |
-| Payment Service | Spring Boot, PostgreSQL | Payment requests, idempotency key, fund transfer, compensation and payment outbox |
-| Fraud Service | Spring for Apache Kafka | Consume payment-created events; publish approved/rejected outcomes |
-| Ledger Service | Spring for Apache Kafka, PostgreSQL | Consume approved events; persist ledger transactions |
-| Outbox Publisher | Spring Boot, Kafka | Publish pending payment events from the database to Kafka |
-| Local Infrastructure | Docker | PostgreSQL and Kafka containers |
+| Service | Port | Responsibility |
+|---|---:|---|
+| Customer Service | `8081` | Customer data and validation |
+| Account Service | `8082` | Accounts, balances, debit/credit and account-operation idempotency |
+| Payment Service | `8083` | Payment lifecycle, Outbox, Saga compensation, final payment state |
+| Fraud Service | `8084` | Fraud validation and approval/rejection events |
+| Ledger Service | `8085` | Ledger posting and reversal records |
+| Notification Service | `8086` | Persist final success/rejection/reversal notifications |
+| Integration Service | `8087` | Kafka-to-IBM-MQ and IBM-MQ-to-Kafka integration |
+| Core Banking Simulator | `8088` | Simulates the legacy/core banking processor behind IBM MQ |
 
-## Service Ports
+---
 
-| Service | Port |
-|---|---:|
-| Customer Service | 8081 |
-| Account Service | 8082 |
-| Payment Service | 8083 | 
-| Fraud Service | 8084 | 
-| Ledger Service | 8085 | 
-| Notification Service | 8086 |
-| Integration Service | 8087 | 
+## PostgreSQL
 
-## Payment Service
-
-The Payment Service handles payment requests and fund transfers through REST APIs.
-
-**Current payment processing:**
+PostgreSQL 16 runs locally in Docker.
 
 ```text
-Receive payment request
-    |
-    v
-Check idempotency key
-    |
-    v
-Validate source and target accounts
-    |
-    v
-Create PENDING payment
-    |
-    v
-Debit source account
-    |
-    v
-Credit target account
-    |
-    +-- Success --> COMPLETED
-    |
-    +-- Failure --> Credit source account back
-                          |
-                          +-- COMPENSATED
-                          +-- COMPENSATION_FAILED
+Container: banking-postgres
+Host port: 5433
+Container port: 5432
+Username: banking
+Password: supplied through DB_PASSWORD
 ```
 
-### Request Idempotency
-
-Payment requests use an idempotency key to prevent repeat submissions from creating duplicate payment requests. Retrying the same request with the same key returns the existing payment.
-
-Example keys:
+Databases used:
 
 ```text
-REQ-1006
-REQ-1007
-REQ-1008
+customerdb
+accountdb
+paymentdb
+ledgerdb
+notificationdb
+integrationdb
 ```
 
-### Saga-Style Compensation
-
-The implemented synchronous transfer flow compensates a successful debit when the following credit operation fails. Compensation outcomes include `COMPENSATED` and `COMPENSATION_FAILED`.
-
-This synchronous account-transfer compensation is separate from the Kafka fraud/ledger event flow.
-
-## Transactional Outbox Pattern
-
-Payment data and a pending outbox event are written in one PostgreSQL transaction, avoiding a payment record being committed without a corresponding event record.
-
-```text
-Payment database transaction
-    |-- Save payment
-    +-- Save outbox event (PENDING)
-                |
-                v
-          Outbox Publisher
-                |
-                v
-             Kafka
-                |
-                v
-      Mark outbox event PUBLISHED
-```
-
-Outbox event fields include:
-
-```text
-eventId
-aggregateType
-aggregateId
-eventType
-payload
-status
-createdAt
-publishedAt
-```
-
-The event payload is stored as JSON text in PostgreSQL. The current local flow uses an outbox publisher; multi-instance locking/claiming is a future enhancement.
-
-## Kafka Event Contract
-
-The Kafka payload uses a separate `PaymentEvent` DTO instead of publishing JPA entities directly.
-
-```json
-{
-  "eventId": "unique-event-id",
-  "eventType": "PAYMENT_CREATED",
-  "paymentId": 8,
-  "paymentReference": "PAY-...",
-  "sourceAccountNumber": "ACC1001",
-  "targetAccountNumber": "ACC1002",
-  "amount": 500.00,
-  "currency": "NZD",
-  "status": "PENDING"
-}
-```
-
-### Kafka Topics
-
-| Topic | Purpose | Current status |
-|---|---|---|
-| `payment-created` | Payment creation events for Fraud Service | Used |
-| `payment-approved` | Fraud-approved payment events for Ledger Service | Used |
-| `payment-rejected` | Fraud-rejected payment events | Published and tested |
-| `notification-events` | Downstream notification events | Created; end-to-end verification pending |
-| `payment-retry` | Failed-message retry routing | Created; processing planned |
-| `payment-dlq` | Dead-letter messages after retries | Created; processing planned |
-
-`payment-events` was an earlier outbox test topic and is not part of the target architecture.
-
-**Local topic configuration:** 3 partitions; replication factor 1 (single-broker local development). Events that use the same Kafka message key are routed to the same partition, preserving their order within that partition.
-
-## Fraud Service
-
-Consumes `payment-created` and publishes fraud decisions.
-
-**Current test rule:**
-
-```text
-amount <= 10000 -> APPROVED -> payment-approved
-amount >  10000 -> REJECTED -> payment-rejected
-```
-
-Both decisions have been tested. The amount threshold is a development rule, not a production fraud decision engine.
-
-## Ledger Service
-
-Consumes `payment-approved` and inserts an approved payment record into `ledgerdb.ledger_transactions`.
-
-Stored data includes:
-
-```text
-paymentId
-paymentReference
-sourceAccountNumber
-targetAccountNumber
-amount
-currency
-status
-createdAt
-```
-
-The approved transaction insert has been tested successfully. The service is configured to publish `notification-events`, but complete downstream handling is not yet verified.
-
-Fraud-rejected events are not posted to the ledger.
-
-## PostgreSQL Databases
-
-| Database | Contents |
-|---|---|
-| `customerdb` | Customer records |
-| `paymentdb` | `payments`, `outbox_events` |
-| `ledgerdb` | `ledger_transactions` |
-
-PostgreSQL runs in Docker with host port `5433` mapped to container port `5432`.
-
-### Database Configuration
-
-Database credentials are passed through environment variables rather than committed into application configuration.
-
-```powershell
-$env:DB_PASSWORD="<your-local-db-password>"
-```
-
-Example Payment Service configuration:
+Example configuration:
 
 ```properties
 spring.datasource.url=jdbc:postgresql://localhost:5433/paymentdb
@@ -241,36 +159,649 @@ spring.datasource.username=banking
 spring.datasource.password=${DB_PASSWORD}
 ```
 
-Example Ledger Service configuration:
+---
+
+## Apache Kafka
+
+Kafka runs locally in Docker.
+
+```text
+Container: banking-kafka
+Bootstrap server: localhost:9092
+```
+
+### Topics
+
+```text
+payment-created
+payment-approved
+payment-rejected
+funds-transferred
+ledger-updated
+core-processed
+core-failed
+notification-events
+payment-reversed
+payment-retry
+payment-dlq
+```
+
+An older local test topic may also exist:
+
+```text
+payment-events
+```
+
+### Local Topic Configuration
+
+```text
+Partitions: 3
+Replication factor: 1
+```
+
+Events are published with `paymentId` / aggregate ID as the Kafka key so events for the same payment remain ordered within a topic partition.
+
+---
+
+## Payment Creation
+
+A payment is created as `PENDING`.
+
+```text
+POST /api/payments
+        |
+        v
+Check request idempotency key
+        |
+        v
+Validate source account
+        |
+        v
+Validate target account
+        |
+        v
+Save Payment = PENDING
+        +
+Save PAYMENT_CREATED OutboxEvent
+        |
+        v
+Return payment
+```
+
+The Payment Service does **not** debit or credit the accounts during initial payment creation. Fraud screening happens first.
+
+---
+
+## Fraud Processing
+
+Fraud Service consumes:
+
+```text
+payment-created
+```
+
+Current project rule:
+
+```text
+amount <= 10000
+    -> PAYMENT_APPROVED
+    -> payment-approved
+
+amount > 10000
+    -> PAYMENT_REJECTED
+    -> payment-rejected
+```
+
+A rejected payment does not enter the account-transfer, ledger, or IBM MQ flow.
+
+---
+
+## Approved Payment Processing
+
+Payment Service consumes:
+
+```text
+payment-approved
+```
+
+Then:
+
+```text
+Load payment
+    |
+    v
+Check eventId idempotency
+    |
+    v
+Check payment status
+    |
+    v
+Debit source account
+    |
+    v
+Credit target account
+    |
+    +--> success
+    |       |
+    |       v
+    |   FUNDS_TRANSFERRED
+    |       |
+    |       v
+    |   Outbox -> funds-transferred
+    |
+    +--> credit failure
+            |
+            v
+      Credit source back
+            |
+            +--> COMPENSATED
+            |
+            +--> COMPENSATION_FAILED
+```
+
+---
+
+## Idempotency
+
+The project implements multiple idempotency layers.
+
+### 1. Payment Request Idempotency
+
+`PaymentRequest.idempotencyKey` prevents duplicate payment creation.
+
+```text
+Same idempotencyKey
+       |
+       v
+Return existing payment
+```
+
+### 2. Kafka Event Idempotency
+
+Processed Kafka event IDs are stored in:
+
+```text
+processed_events
+```
+
+Before processing a Kafka event:
+
+```text
+eventId already exists?
+    YES -> ignore duplicate
+    NO  -> continue
+```
+
+### 3. Payment-State Idempotency
+
+Before moving money, Payment Service checks the payment status.
+
+Already-processed states such as:
+
+```text
+FUNDS_TRANSFERRED
+COMPLETED
+REVERSED
+COMPENSATED
+COMPENSATION_FAILED
+REJECTED
+```
+
+are not processed again.
+
+### 4. Account Operation Idempotency
+
+Account Service stores money-movement operation IDs in:
+
+```text
+processed_account_operations
+```
+
+Example operation IDs:
+
+```text
+PAYMENT-25-DEBIT
+PAYMENT-25-CREDIT
+PAYMENT-25-COMPENSATION
+PAYMENT-25-REVERSAL-DEBIT-TARGET
+PAYMENT-25-REVERSAL-CREDIT-SOURCE
+```
+
+Payment Service sends the operation ID in:
+
+```text
+X-Operation-Id
+```
+
+If the same REST request is retried, Account Service detects the existing operation and does not change the balance again.
+
+---
+
+## Saga Compensation
+
+If the source debit succeeds but target credit fails:
+
+```text
+Debit source
+    |
+    v
+Credit target fails
+    |
+    v
+Credit source back
+    |
+    +--> success -> COMPENSATED
+    |
+    +--> failure -> COMPENSATION_FAILED
+```
+
+No distributed two-phase commit is used.
+
+The platform uses:
+
+```text
+Local ACID transactions
++ Transactional Outbox
++ Kafka
++ Saga compensation
++ Idempotency
+```
+
+---
+
+## Transactional Outbox Pattern
+
+Payment and Outbox events are stored in the same local database transaction.
+
+```text
+@Transactional
+      |
+      +--> save Payment
+      |
+      +--> save OutboxEvent = PENDING
+```
+
+This prevents the failure case where the payment is committed but the event is lost before Kafka receives it.
+
+### Outbox Publisher
+
+Spring scheduling is enabled and the `OutboxPublisher` periodically polls the outbox table.
+
+```text
+@EnableScheduling
+        |
+        v
+@Scheduled
+        |
+        v
+find PENDING events
+        |
+        v
+KafkaTemplate.send(...)
+        |
+        v
+Kafka acknowledgement
+        |
+        +--> success -> SENT
+        |
+        +--> failure -> retryCount + 1
+```
+
+Outbox reliability fields:
+
+```text
+retryCount
+lastError
+lastAttemptAt
+sentAt
+```
+
+After the configured maximum retry count is reached:
+
+```text
+status = FAILED
+```
+
+The event remains in the outbox table for investigation and controlled replay.
+
+A failed event can later be reset to:
+
+```text
+status = PENDING
+retryCount = 0
+```
+
+after the root cause is fixed, allowing the existing `OutboxPublisher` to publish it again.
+
+---
+
+## Kafka Retry and DLQ
+
+Fraud Service includes a Spring Kafka `DefaultErrorHandler`.
+
+Current retry configuration:
+
+```text
+Backoff: 2 seconds
+Retries: 2
+Total processing attempts: 3
+```
+
+Flow:
+
+```text
+Kafka message
+    |
+    v
+Consumer processing
+    |
+    +--> success -> continue
+    |
+    +--> failure
+            |
+            v
+          retry
+            |
+            v
+          retry
+            |
+            v
+      payment-dlq
+```
+
+The project uses a `DeadLetterPublishingRecoverer` to route exhausted consumer failures to:
+
+```text
+payment-dlq
+```
+
+Outbox publishing failures and Kafka consumer failures are intentionally handled differently:
+
+```text
+Outbox publish failure
+-> FAILED row remains in outbox table
+
+Kafka consumer failure
+-> retry
+-> payment-dlq after retry exhaustion
+```
+
+---
+
+## Ledger Service
+
+Ledger Service consumes:
+
+```text
+funds-transferred
+```
+
+It persists an immutable ledger transaction in:
+
+```text
+ledger_transactions
+```
+
+Then publishes:
+
+```text
+LEDGER_UPDATED
+-> ledger-updated
+```
+
+The ledger event starts the integration flow toward IBM MQ.
+
+For reversals, a new reversal ledger entry is created rather than deleting the original ledger transaction.
+
+---
+
+## IBM MQ / JMS Integration
+
+IBM MQ is real in this project. Only the external/core banking application is simulated.
+
+### IBM MQ Docker Container
+
+```text
+Container: banking-mq
+Queue Manager: QM1
+Connection: localhost(1414)
+Channel: DEV.APP.SVRCONN
+User: app
+Password: supplied through MQ_PASSWORD
+Web console: https://localhost:9443
+```
+
+Spring configuration:
 
 ```properties
-spring.datasource.url=jdbc:postgresql://localhost:5433/ledgerdb
-spring.datasource.username=banking
-spring.datasource.password=${DB_PASSWORD}
+ibm.mq.queueManager=QM1
+ibm.mq.channel=DEV.APP.SVRCONN
+ibm.mq.connName=localhost(1414)
+ibm.mq.user=app
+ibm.mq.password=${MQ_PASSWORD}
 ```
 
-## Docker Infrastructure
+### Request Queue
 
-| Container | Service | Host connection |
-|---|---|---|
-| `banking-postgres` | PostgreSQL | `localhost:5433` |
-| `banking-kafka` | Apache Kafka | `localhost:9092` |
-
-Check running containers:
-
-```powershell
-docker ps
+```text
+DEV.QUEUE.1
 ```
 
-## Testing and Verification
+Used by:
 
-### Kafka Topics
+```text
+Integration Service
+    |
+    v
+JmsTemplate.convertAndSend(...)
+    |
+    v
+DEV.QUEUE.1
+    |
+    v
+Core Banking Simulator
+```
+
+### Response Queue
+
+```text
+DEV.QUEUE.2
+```
+
+Used by:
+
+```text
+Core Banking Simulator
+    |
+    v
+JmsTemplate
+    |
+    v
+DEV.QUEUE.2
+    |
+    v
+Integration Service @JmsListener
+```
+
+### JMS Components
+
+`JmsTemplate` is used to send messages.
+
+```java
+jmsTemplate.convertAndSend("DEV.QUEUE.1", payload);
+```
+
+`@EnableJms` enables Spring JMS listener support.
+
+`@JmsListener` consumes messages from IBM MQ queues.
+
+```java
+@JmsListener(destination = "DEV.QUEUE.1")
+```
+
+and:
+
+```java
+@JmsListener(destination = "DEV.QUEUE.2")
+```
+
+The IBM MQ Spring Boot starter reads the `ibm.mq.*` properties and configures the underlying MQ `ConnectionFactory`.
+
+---
+
+## Core Banking Request / Response
+
+Integration Service converts the Kafka `PaymentEvent` into a `CoreBankingRequest`.
+
+Request data includes:
+
+```text
+messageId
+correlationId
+paymentId
+paymentReference
+sourceAccountNumber
+targetAccountNumber
+amount
+currency
+requestTimestamp
+```
+
+The Core Banking Simulator processes the request and sends a `CoreBankingResponse`.
+
+Response data includes:
+
+```text
+messageId
+correlationId
+paymentId
+paymentReference
+status
+message
+```
+
+Integration Service consumes the MQ response and publishes:
+
+```text
+SUCCESS -> core-processed
+FAILURE -> core-failed
+```
+
+---
+
+## Payment Completion
+
+Payment Service consumes:
+
+```text
+core-processed
+```
+
+Then:
+
+```text
+FUNDS_TRANSFERRED
+        |
+        v
+COMPLETED
+        |
+        v
+PAYMENT_COMPLETED OutboxEvent
+        |
+        v
+notification-events
+```
+
+---
+
+## Notification Service
+
+Notification Service consumes:
+
+```text
+notification-events
+payment-rejected
+```
+
+It stores notifications in:
+
+```text
+notificationdb
+```
+
+Examples:
+
+```text
+Payment PAY-... completed successfully for 150.00 NZD
+```
+
+and:
+
+```text
+Payment PAY-... was rejected by fraud screening.
+```
+
+The successful end-to-end flow through Kafka, IBM MQ, payment completion, and notification persistence has been tested.
+
+---
+
+## Reversal Design
+
+The project includes a core-banking failure reversal path.
+
+```text
+core-failed
+    |
+    v
+Payment Service
+    |
+    v
+Debit original target
+    |
+    v
+Credit original source
+    |
+    +--> success -> REVERSED
+    |
+    +--> failure -> REVERSAL_FAILED
+```
+
+Reversal money movements use deterministic idempotency operation IDs so a retry cannot apply the same reversal twice.
+
+---
+
+## Repository Structure
+
+```text
+digital-banking-platform/
+├── account-service/
+├── core-banking-simulator/
+├── customer-service/
+├── fraud-service/
+├── integration-service/
+├── ledger-service/
+├── notification-service/
+├── payment-service/
+├── doc/
+│   ├── Digital Banking Event Flow Architecture.png
+│   ├── Digital Banking Platform Architecture.png
+│   └── Kafka Digital Banking Event Flow.png
+└── README.md
+```
+
+---
+
+## Useful Kafka Commands
+
+List topics:
 
 ```powershell
 docker exec -it banking-kafka /opt/kafka/bin/kafka-topics.sh `
   --list `
   --bootstrap-server localhost:9092
 ```
+
+Describe a topic:
 
 ```powershell
 docker exec -it banking-kafka /opt/kafka/bin/kafka-topics.sh `
@@ -279,7 +810,7 @@ docker exec -it banking-kafka /opt/kafka/bin/kafka-topics.sh `
   --bootstrap-server localhost:9092
 ```
 
-### Read Kafka Events
+Consume a topic:
 
 ```powershell
 docker exec -it banking-kafka /opt/kafka/bin/kafka-console-consumer.sh `
@@ -290,107 +821,88 @@ docker exec -it banking-kafka /opt/kafka/bin/kafka-console-consumer.sh `
   --property print.partition=true
 ```
 
-For approved or rejected payment messages, replace `payment-created` with `payment-approved` or `payment-rejected`.
+Check DLQ:
 
-### Inspect Payment Outbox
+```powershell
+docker exec -it banking-kafka /opt/kafka/bin/kafka-console-consumer.sh `
+  --bootstrap-server localhost:9092 `
+  --topic payment-dlq `
+  --from-beginning
+```
+
+---
+
+## Useful PostgreSQL Commands
+
+Payment DB:
 
 ```powershell
 docker exec -it banking-postgres psql -U banking -d paymentdb
 ```
 
-```sql
-SELECT id, aggregate_id, event_type, status, created_at, published_at
-FROM outbox_events
-ORDER BY created_at DESC
-LIMIT 10;
+Account DB:
+
+```powershell
+docker exec -it banking-postgres psql -U banking -d accountdb
 ```
 
-### Inspect Ledger Records
+Ledger DB:
 
 ```powershell
 docker exec -it banking-postgres psql -U banking -d ledgerdb
 ```
 
-```sql
-SELECT * FROM ledger_transactions ORDER BY id DESC;
+Notification DB:
+
+```powershell
+docker exec -it banking-postgres psql -U banking -d notificationdb
 ```
 
-### Verified Milestone
+Check processed account operations:
 
-- Payment API and synchronous debit/credit compensation flow
-- Payment request idempotency key
-- Payment and outbox event persistence
-- Outbox publishing to Kafka
-- Kafka payment creation event consumed by Fraud Service
-- Approved and rejected fraud decisions published to Kafka
-- Approved payment consumed by Ledger Service
-- Approved ledger record inserted into PostgreSQL
+```sql
+SELECT *
+FROM processed_account_operations
+ORDER BY processed_at DESC;
+```
 
-## Kafka Runtime Evidence
+Check processed Kafka events:
 
-The following screenshots capture local runtime behaviour on **6 October 2026**. They document Kafka startup, producer and consumer configuration, payment event consumption, fraud event publishing, and outbox polling. They are supplementary evidence, not proof of every end-to-end workflow.
+```sql
+SELECT *
+FROM processed_events
+ORDER BY processed_at DESC;
+```
 
-| Evidence | Observed result |
-|---|---|
-| Payment Service startup | Embedded Tomcat started on HTTP port `8083`; Kafka consumer configuration logged with bootstrap server `localhost:9092`, group `payment-group`, `enable.auto.commit=false`, `auto.offset.reset=earliest`, and `heartbeat.interval.ms=3000`. |
-| Fraud Service producer | Kafka producer initialized as an **idempotent producer**. Fraud Service logged receipt of a payment and publication to `payment-approved`. |
-| Payment event consumer | Payment Service logged receipt of a JSON payment event, including payment reference, amount `500.00`, currency `NZD`, and `status=COMPLETED`. This establishes consumption of a test event; it does not by itself establish completion of the new end-to-end asynchronous payment workflow. |
-| Legacy test topic consumer | Consumer group `payment-group` received partition assignments for `payment-events` partitions `0`, `1`, and `2`, and logged a received payment event. |
-| Outbox polling | Hibernate logged a query selecting pending rows from `outbox_events`, ordered by `created_at`. The SQL log proves that the poll query ran, not that a specific message was delivered or acknowledged. |
+Check latest Outbox events:
 
-### Payment Service: Kafka Consumer Configuration
+```sql
+SELECT *
+FROM outbox_events
+ORDER BY created_at DESC;
+```
+
+---
+
+## Environment Variables
+
+Local secrets are externalized through environment variables.
+
+Example:
+
+```powershell
+$env:DB_PASSWORD="<local-db-password>"
+$env:MQ_PASSWORD="<local-mq-password>"
+```
+
+Configuration:
 
 ```properties
-bootstrap.servers=localhost:9092
-group.id=payment-group
-auto.offset.reset=earliest
-enable.auto.commit=false
-heartbeat.interval.ms=3000
+spring.datasource.password=${DB_PASSWORD}
+ibm.mq.password=${MQ_PASSWORD}
 ```
 
-The service startup log confirms port `8083`. Offset commits and processing guarantees require separate verification; `enable.auto.commit=false` only disables automatic offset commits.
-
-![Payment Service startup and Kafka consumer configuration](./docs/evidence/payment-consumer-config.png)
-
-### Fraud Service: Kafka Approval Event
-
-```text
-Fraud Service received payment: PAY-11ab153c-f28b-4172-811d-ab61ce3d34f5
-Fraud result published to: payment-approved
-```
-
-The logs also show a Kafka **idempotent producer**. Producer idempotence helps avoid duplicate writes from retries within Kafka's supported guarantees; it is not the same as application-level consumer idempotency.
-
-![Fraud Service approval publishing](./docs/evidence/fraud-approval-published.png)
-
-### Payment Service: JSON Payment Event Consumed
-
-The Payment Service logged a payment event with the following representative fields:
-
-```json
-{
-  "paymentReference": "PAY-c8fe8950-9d8e-4947-aa3c-5a084e8958de",
-  "sourceAccountNumber": "ACC1001",
-  "targetAccountNumber": "ACC1002",
-  "amount": 500.00,
-  "currency": "NZD",
-  "paymentType": "TRANSFER",
-  "status": "COMPLETED",
-  "idempotencyKey": "REQ-1006"
-}
-```
-
-This is a logged test event. Its `COMPLETED` status must not be interpreted as confirmation of IBM MQ or core banking processing.
-
-![Payment JSON event consumed](./docs/evidence/payment-json-event.png)
-
-### Kafka Partition Assignment and Outbox Polling
-
-The consumer log shows `payment-events-0`, `payment-events-1`, and `payment-events-2` assigned to `payment-group`, followed by receipt of a test message. A Hibernate SQL log shows selection of pending `outbox_events` rows ordered by creation time.
-
-`payment-events` is an **earlier test topic**, separate from the target `payment-created` flow.
-
-![Kafka partition assignments and outbox query](./docs/evidence/partition-assignment-outbox-query.png)
+Do not commit passwords or secrets to Git.
 
 ---
 
@@ -399,16 +911,107 @@ The consumer log shows `payment-events-0`, `payment-events-1`, and `payment-even
 | Area | Technology |
 |---|---|
 | Language | Java 17 |
-| Application Framework | Spring Boot |
-| REST | Spring Web / MVC |
+| Framework | Spring Boot |
+| REST | Spring Web / RestClient |
 | Persistence | Spring Data JPA / Hibernate |
 | Database | PostgreSQL 16 |
-| Messaging | Apache Kafka, Spring for Apache Kafka |
-| Serialization | Jackson / JSON |
+| Event Streaming | Apache Kafka |
+| Kafka Client | Spring for Apache Kafka |
+| Enterprise Messaging | IBM MQ |
+| JMS | Spring JMS / JmsTemplate / @JmsListener |
+| JSON | Jackson |
+| Reliability | Transactional Outbox, Retry/DLQ, Idempotency, Saga Compensation |
 | Build | Maven |
-| Containers | Docker |
+| Local Infrastructure | Docker |
 | API Testing | Postman |
-| Version Control | Git / GitHub |
+| Source Control | Git / GitHub |
 
+---
 
+## Implemented Reliability Patterns
+
+```text
+Transactional Outbox
+Kafka keyed messages
+Kafka consumer groups
+Retry with backoff
+Dead Letter Queue
+Request idempotency
+Kafka event idempotency
+Payment-state idempotency
+Account-operation idempotency
+Saga compensation
+IBM MQ request/reply
+Correlation ID in core-banking request/response
 ```
+
+---
+
+## Current Implementation Status
+
+Implemented and tested:
+
+```text
+Customer Service
+Account Service
+Payment Service
+Fraud Service
+Ledger Service
+Notification Service
+Integration Service
+Core Banking Simulator
+
+PostgreSQL
+Apache Kafka
+Transactional Outbox
+Scheduled Outbox Publisher
+Fraud approval/rejection
+Account debit/credit
+Saga compensation
+Ledger persistence
+IBM MQ / JMS request-response
+Payment completion
+Notification persistence
+Payment request idempotency
+Kafka event idempotency
+Account operation idempotency
+Basic Kafka retry/DLQ
+Successful end-to-end payment flow
+```
+
+---
+
+## Remaining Work
+
+The core payment architecture is implemented. Remaining work focuses mainly on production-readiness and deployment:
+
+```text
+End-to-end correlation/tracing improvements
+Spring Security + JWT
+Secret management / Vault
+JUnit + Mockito tests
+REST/integration tests
+Docker images for all services
+Jenkins CI/CD
+Amazon ECR
+AWS EKS
+API Gateway / ALB / WAF / Route 53
+Actuator / CloudWatch / Prometheus / Grafana
+React UI
+```
+
+---
+
+## Project Objective
+
+This project demonstrates practical implementation of distributed banking-system patterns using Java and Spring Boot:
+
+- Event-driven microservices with Kafka
+- Reliable event publication with the Transactional Outbox Pattern
+- Fraud screening before money movement
+- Saga-style compensation
+- Multi-layer idempotency
+- Ledger persistence
+- IBM MQ/JMS request-reply integration with legacy/core banking
+- Retry and DLQ handling
+- Final payment-state management and notification processing
