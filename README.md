@@ -783,6 +783,7 @@ digital-banking-platform/
 ├── notification-service/
 ├── payment-service/
 ├── docs/
+│   ├── runtime-2026-10-13/  # Kafbat UI screenshots captured on 13 October
 │   ├── fraud-approval-published.png
 │   ├── partition-assignment-outbox-query.png
 │   ├── payment-consumer-config.png
@@ -830,6 +831,76 @@ The consumer group `payment-group` was assigned partitions 0, 1 and 2 of the ear
 ![Kafka partitions and outbox SQL](docs/partition-assignment-outbox-query.png)
 
 These screenshots demonstrate the particular Kafka and database operations shown in the logs. They are not, by themselves, evidence of the entire IBM MQ request/reply workflow.
+
+---
+
+## Kafka Monitoring and Runtime Evidence — 13 October 2026
+
+Kafbat UI was used to inspect the local `digital-banking` Kafka cluster, topic partitions, event records and consumer groups. The screenshots below were selected from the local development captures and show the state at capture time; message counts change as payments are submitted and records expire.
+
+### Cluster dashboard
+
+The dashboard shows one online cluster, one broker, 13 topics and 86 partitions. The topic list includes the internal `__consumer_offsets` topic with 50 partitions and 12 application/test topics with three partitions each. The displayed Kafka version is `Unknown`.
+
+![Kafbat UI digital-banking cluster dashboard](docs/runtime-2026-10-13/kafka-cluster-dashboard.png)
+
+### Topics and event flow
+
+The topics view includes `payment-created`, `payment-approved`, `payment-rejected`, `funds-transferred`, `ledger-updated`, `core-processed`, `core-failed`, `notification-events`, `payment-reversed`, `payment-retry`, `payment-dlq` and the earlier `payment-events` test topic.
+
+At this snapshot, the UI shows records in the approval, rejection, funds-transfer, ledger, core-processed and notification topics. It also shows one record in `payment-dlq`. That DLQ count establishes that a record is present; diagnosing its cause requires inspecting the record and exception headers. The existence of `payment-retry` alone does not demonstrate that a separate retry-topic workflow is active.
+
+![Kafka topic inventory and message counts](docs/runtime-2026-10-13/kafka-topics.png)
+
+### Partitions, offsets and replication
+
+The `payment-approved` overview shows three partitions, replication factor one, zero under-replicated partitions and 11 retained messages. Partition 0 has six messages and partition 1 has five. Partition 2 has no retained messages, with first and next offsets both equal to 2. Offsets identify positions within a partition; they are not a global message counter.
+
+Replication factor one means the local demonstration has no redundant replica for each partition. This setup illustrates partitioning and message flow, but does not demonstrate broker-failure resilience.
+
+![Payment-approved partition and offset overview](docs/runtime-2026-10-13/payment-approved-partitions.png)
+
+### Payment keys across approval and notification topics
+
+The approval message list shows keys `23` and `24` on 13 October. Key `23` appears in partition 0 and key `24` in partition 1. The notification list also contains keys `23` and `24`, providing a way to follow those payment identifiers across the two topics.
+
+| Payment key | Approval timestamp | Notification timestamp |
+|---|---|---|
+| `23` | 13 October 2026, 06:00:01.878 | 13 October 2026, 06:00:10.911 |
+| `24` | 13 October 2026, 06:01:26.274 | 13 October 2026, 06:01:36.364 |
+
+Times are displayed in the local UI timezone, UTC+13. These are event timestamps shown in the screenshots, not a controlled latency benchmark. Ordering is scoped to a partition within one topic; matching keys across different topics do not create a single global ordering guarantee.
+
+![Payment-approved records with keys and partitions](docs/runtime-2026-10-13/payment-approved-messages.png)
+
+![Notification-event records for corresponding payment keys](docs/runtime-2026-10-13/notification-events.png)
+
+### Consumer groups and lag
+
+| Consumer group | Topic shown | Captured state | Members / active consumers | Lag |
+|---|---|---|---:|---:|
+| `fraud-group` | `payment-created` | STABLE | 1 | 0 |
+| `integration-group` | `ledger-updated` | STABLE | 1 | 0 |
+
+The Integration Service group has one assigned topic and three assigned partitions. These group names also match the committed Fraud Service and Integration Service configuration.
+
+A stable group has completed its current partition assignment. Zero reported lag means the group is caught up according to the offsets reported by the UI at that moment; it does not by itself prove successful database writes, IBM MQ replies or final payment completion.
+
+![Fraud consumer group on payment-created](docs/runtime-2026-10-13/fraud-consumer-group.png)
+
+![Integration consumer group with three partitions and zero lag](docs/runtime-2026-10-13/integration-consumer-group.png)
+
+### Repeating the local inspection
+
+1. Start the local Kafka infrastructure and relevant Spring Boot services using the configuration documented above.
+2. Open the configured Kafbat UI instance and select `digital-banking`.
+3. Inspect **Topics** for the event topics, partition counts and replication factor.
+4. Submit a payment through `POST /api/payments` with a fresh request idempotency key, then locate its payment key in the event topics.
+5. Compare the payment key in approval and notification records; inspect the intermediate topics and service logs to trace the full flow.
+6. Inspect **Consumers** for group membership, assigned partitions and lag.
+7. For failures, inspect `payment-dlq`, application logs and outbox rows before attempting a controlled replay.
+
+These captures document local Kafka observability. Full end-to-end verification additionally requires the corresponding payment state, account balances, ledger entries, MQ request/reply evidence and notification persistence.
 
 ---
 
@@ -966,6 +1037,7 @@ Do not commit passwords or secrets to Git.
 | Build | Maven |
 | Local Infrastructure | Docker |
 | API Testing | Postman |
+| Kafka Inspection | Kafbat UI |
 | Source Control | Git / GitHub |
 
 ---
